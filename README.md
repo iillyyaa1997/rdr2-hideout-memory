@@ -23,7 +23,7 @@ Visited hideouts are kept in `<game>\HideoutMemory.dat` (one `x y z` per line). 
 
 ## How it works
 
-Bandit Hideouts calls natives through three exports of `ScriptHookRDR2.dll`. Hideout Memory rewrites those import-table entries of `Bandit_Hideouts.asi` only, watches `BLIP_ADD_FOR_RADIUS` / `SET_BLIP_SPRITE` and toggles `BLIP_MODIFIER_HIDDEN` on the skulls. Every call is passed on to whatever the entry held before, so it works next to other plugins that hook the same mod, such as [RuText](https://github.com/iillyyaa1997/rdr2-rutext): it patches a few seconds after the game starts, after them, and checks its entries every tick.
+Bandit Hideouts calls natives through three exports of `ScriptHookRDR2.dll`. Hideout Memory rewrites those import-table entries of `Bandit_Hideouts.asi` only, watches `BLIP_ADD_FOR_RADIUS` / `SET_BLIP_SPRITE` and toggles `BLIP_MODIFIER_HIDDEN` on the skulls. Every call is passed on to whatever the entry held before, so it works next to other plugins that hook the same mod, such as [Telegraph](https://github.com/iillyyaa1997/rdr2-telegraph) (or the older [RuText](https://github.com/iillyyaa1997/rdr2-rutext)): it patches a few seconds after the game starts, after them, and checks its entries every tick.
 
 ## Build
 
