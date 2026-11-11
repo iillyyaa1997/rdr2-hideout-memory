@@ -30,7 +30,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "1.0.0";
+constexpr const char* kVersion = "1.0.1";
 
 constexpr const char* kExpInit = "?nativeInit@@YAX_K@Z";
 constexpr const char* kExpPush = "?nativePush64@@YAX_K@Z";
@@ -48,6 +48,7 @@ constexpr uint64_t kBlipAddForCoords = 0x554D9D53F696D002ULL;
 constexpr uint64_t kBlipAddForRadius = 0x45F13B7E0A15C880ULL;  // what Bandit Hideouts uses
 constexpr uint64_t kSetBlipSprite = 0x74F74D3207ED525CULL;
 constexpr uint64_t kDoesBlipExist = 0xCD82FA174080B3B1ULL;
+constexpr uint64_t kRemoveBlip = 0xF2C3C9DA47AAA54AULL;  // REMOVE_BLIP(Blip*)
 constexpr uint64_t kBlipAddModifier = 0x662D364ABF16DE2FULL;
 constexpr uint64_t kBlipRemoveModifier = 0xB059D7BD3D78C16FULL;
 constexpr uint64_t kPlayerPedId = 0x096275889B8E0EE0ULL;
@@ -95,6 +96,15 @@ struct Blip {
 std::vector<Blip> g_blips;                     // game thread only (script fibers)
 std::vector<std::array<float, 3>> g_visited;  // hideouts the player has been near
 int g_logged = 0;
+DWORD g_scriptStart = 0;  // GetTickCount when our script started; skulls added later are logged
+
+bool LateEnough() { return g_scriptStart && GetTickCount() - g_scriptStart > 30000; }
+
+Blip* Find(int handle) {
+  for (auto& b : g_blips)
+    if (b.handle == handle) return &b;
+  return nullptr;
+}
 
 std::wstring DataFile() { return g_dir + L"\\HideoutMemory.dat"; }
 
@@ -126,7 +136,7 @@ bool Visited(const Blip& b) {
 
 void Track(int handle, float x, float y, float z, uint32_t hash) {
   if (!handle) return;
-  if (g_logged < 10) {
+  if (g_logged < 10 || LateEnough()) {
     ++g_logged;
     Log("blip %d at %.1f %.1f, hash 0x%08X", handle, x, y, hash);
   }
@@ -139,18 +149,37 @@ void Track(int handle, float x, float y, float z, uint32_t hash) {
 }
 
 void Sprite(int handle, uint32_t sprite) {
-  for (auto& b : g_blips)
-    if (b.handle == handle) {
-      if (sprite == kSpriteHideout) b.skull = true;
-      b.shown = false;  // a new sprite may reset modifiers: settle on the next tick
-      return;
-    }
+  Blip* b = Find(handle);
+  if (!b) return;
+  const bool skull = sprite == kSpriteHideout;
+  if (LateEnough() && skull != b->skull) {
+    Log("blip %d at %.1f %.1f: %s", handle, b->x, b->y, skull ? "skull set" : "sprite changed from skull");
+  } else if (LateEnough() && skull) {
+    Log("blip %d at %.1f %.1f: skull set again", handle, b->x, b->y);
+  }
+  b->skull = skull;  // another sprite is not ours to hide or show
+  b->shown = false;  // a new sprite may reset modifiers: settle on the next tick
+}
+
+// Bandit Hideouts removes the skull of a cleared hideout; the log shows when, and when a skull
+// comes back, so a skull that stays after a clear can be traced
+void Removed(int handle) {
+  Blip* b = Find(handle);
+  if (b && b->skull) Log("skull blip %d at %.1f %.1f removed by Bandit Hideouts", handle, b->x, b->y);
+}
+
+void Modifier(int handle, uint32_t modifier, bool add) {
+  Blip* b = Find(handle);
+  if (b && b->skull && LateEnough()) {
+    Log("Bandit Hideouts %s modifier 0x%08X on skull blip %d at %.1f %.1f", add ? "adds" : "removes", modifier, handle,
+        b->x, b->y);
+  }
 }
 
 // ---------------------------------------------------------------- hooks on the target's imports
 
 struct CallState {
-  int kind = 0;  // 1 = blip add, 2 = SET_BLIP_SPRITE
+  int kind = 0;  // 1 = blip add, 2 = SET_BLIP_SPRITE, 3 = REMOVE_BLIP, 4/5 = modifier add/remove
   int index = 0;
   uint64_t args[4] = {};
 };
@@ -166,8 +195,11 @@ float ArgFloat(uint64_t v) {
 void HookInit(uint64_t hash) {
   t_call.kind = !g_enabled ? 0
                 : (hash == kBlipAddForRadius || hash == kBlipAddForCoords) ? 1
-                : hash == kSetBlipSprite ? 2
-                                         : 0;
+                : hash == kSetBlipSprite      ? 2
+                : hash == kRemoveBlip         ? 3
+                : hash == kBlipAddModifier    ? 4
+                : hash == kBlipRemoveModifier ? 5
+                                              : 0;
   t_call.index = 0;
   // tail call: a plugin further down the chain (RuText) looks at the return address
   // to tell which mod is calling, so it must still point into Bandit_Hideouts.asi
@@ -181,6 +213,13 @@ void HookPush(uint64_t value) {
 }
 
 uint64_t* HookCall() {
+  if (t_call.kind == 3 && t_call.args[0]) {
+    int handle = 0;  // the game zeroes *blip, so read it before the call
+    memcpy(&handle, (const void*)t_call.args[0], sizeof handle);
+    Removed(handle);
+  } else if (t_call.kind == 4 || t_call.kind == 5) {
+    Modifier((int)(uint32_t)t_call.args[0], (uint32_t)t_call.args[1], t_call.kind == 4);
+  }
   uint64_t* r = g_nextCall();
   if (t_call.kind == 1 && r) {
     int handle = 0;
@@ -314,6 +353,7 @@ void Tick() {
 
 void ScriptMain() {
   Log("script started");
+  g_scriptStart = GetTickCount();
   for (;;) {
     // another plugin may have rewritten the entries after us: take them over again
     if (PatchTarget()) LogChain("import entries changed, chained again");
