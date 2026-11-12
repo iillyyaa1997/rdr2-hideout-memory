@@ -8,6 +8,9 @@
 // and shows them for good once the player comes within Radius metres. Visited
 // hideouts are kept in <game>\HideoutMemory.dat. Bandit Hideouts itself still
 // removes the skull of a cleared hideout until it respawns.
+// With OwnBlips=1 a visited hideout is shown by our own point blip (the game's hideout
+// style and map card, the same skull) instead of the Bandit Hideouts area blip, which the
+// map does not highlight; it lives exactly as long as the Bandit Hideouts skull does.
 //
 // How: ScriptHook mods call natives through three exports of ScriptHookRDR2.dll
 // (nativeInit, nativePush64, nativeCall). HideoutMemory rewrites those import-table
@@ -30,7 +33,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "1.0.1";
+constexpr const char* kVersion = "1.1.0";
 
 constexpr const char* kExpInit = "?nativeInit@@YAX_K@Z";
 constexpr const char* kExpPush = "?nativePush64@@YAX_K@Z";
@@ -53,8 +56,17 @@ constexpr uint64_t kBlipAddModifier = 0x662D364ABF16DE2FULL;
 constexpr uint64_t kBlipRemoveModifier = 0xB059D7BD3D78C16FULL;
 constexpr uint64_t kPlayerPedId = 0x096275889B8E0EE0ULL;
 constexpr uint64_t kGetEntityCoords = 0xA86D5F069399F44DULL;
+constexpr uint64_t kSetBlipNameFromTextFile = 0x0A062D6D7C0B2C2CULL;
+constexpr uint64_t kSetBlipMapCardInfo = 0x02FF4CF43B7209D1ULL;  // (blip, card type, hash); nativedb: SET_BLIP_FLASH_TIMER
 constexpr uint32_t kModifierHidden = 0xB946AEF0;  // BLIP_MODIFIER_HIDDEN
 constexpr uint32_t kSpriteHideout = 0x5846C31D;   // blip_ambient_bounty_target (HIDEOUT_ICON=1)
+// Our own point blip for a visited hideout: Bandit Hideouts draws an area blip (BLIP_STYLE_RCM),
+// which the map neither highlights on hover nor gives a card. BLIP_STYLE_MP_HIDEOUT is the game's
+// hideout style (label BLIP_REGION_HIDEOUT); card type 57 is the game's hideout card, which the
+// game's own map script (map_app_event_handler: func_6/func_25/func_37) fills with its title and picture.
+constexpr uint32_t kStyleHideout = 0xE1C50372;  // BLIP_STYLE_MP_HIDEOUT
+constexpr int kMapCardHideout = 57;
+constexpr const char* kHideoutLabel = "BLIP_REGION_HIDEOUT";
 
 HMODULE g_self = nullptr;
 HMODULE g_sh = nullptr;
@@ -68,6 +80,7 @@ FnPush g_nextPush = nullptr;
 FnCall g_nextCall = nullptr;
 
 bool g_enabled = true;
+bool g_ownBlips = true;  // 1 = our own point blip with a map card instead of the Bandit Hideouts skull
 float g_radius = 150.0f;
 std::wstring g_dir;
 FILE* g_log = nullptr;
@@ -92,8 +105,11 @@ struct Blip {
   float x, y, z;
   bool skull;
   bool shown;
+  uint32_t sprite;  // the skull sprite Bandit Hideouts gave it
+  int own;          // our point blip standing in for it, 0 if none
 };
 std::vector<Blip> g_blips;                     // game thread only (script fibers)
+std::vector<int> g_orphans;                    // our stand-in blips to remove on the next tick
 std::vector<std::array<float, 3>> g_visited;  // hideouts the player has been near
 int g_logged = 0;
 DWORD g_scriptStart = 0;  // GetTickCount when our script started; skulls added later are logged
@@ -142,10 +158,11 @@ void Track(int handle, float x, float y, float z, uint32_t hash) {
   }
   for (auto& b : g_blips)
     if (b.handle == handle) {
-      b = Blip{handle, x, y, z, hash == kSpriteHideout, false};
+      if (b.own) g_orphans.push_back(b.own);  // a reused handle: our stand-in goes, the tick makes a new one
+      b = Blip{handle, x, y, z, hash == kSpriteHideout, false, 0, 0};
       return;
     }
-  g_blips.push_back(Blip{handle, x, y, z, hash == kSpriteHideout, false});
+  g_blips.push_back(Blip{handle, x, y, z, hash == kSpriteHideout, false, 0, 0});
 }
 
 void Sprite(int handle, uint32_t sprite) {
@@ -158,6 +175,7 @@ void Sprite(int handle, uint32_t sprite) {
     Log("blip %d at %.1f %.1f: skull set again", handle, b->x, b->y);
   }
   b->skull = skull;  // another sprite is not ours to hide or show
+  if (skull) b->sprite = sprite;
   b->shown = false;  // a new sprite may reset modifiers: settle on the next tick
 }
 
@@ -301,7 +319,35 @@ R Native(uint64_t hash, A... args) {
   return out;
 }
 
+void Hide(int handle) {
+  // re-applied every tick: Bandit Hideouts may restyle its blip and drop modifiers
+  Native<int>(kBlipRemoveModifier, handle, kModifierHidden);
+  Native<int>(kBlipAddModifier, handle, kModifierHidden);
+}
+
+void RemoveOwn(int& own) {
+  if (own && Native<int>(kDoesBlipExist, own)) {
+    g_shInit(kRemoveBlip);
+    g_shPush((uint64_t)&own);
+    g_shCall();
+  }
+  own = 0;
+}
+
+// A point blip in the game's hideout style with the Bandit Hideouts skull on it and the game's
+// hideout card: the map highlights it under the cursor and shows the card when it is selected
+int AddOwn(const Blip& b) {
+  int own = Native<int>(kBlipAddForCoords, kStyleHideout, b.x, b.y, b.z);
+  if (!own) return 0;
+  Native<int>(kSetBlipMapCardInfo, own, kMapCardHideout, 0);
+  Native<int>(kSetBlipSprite, own, b.sprite ? b.sprite : kSpriteHideout, 1);
+  Native<int>(kSetBlipNameFromTextFile, own, kHideoutLabel);
+  return own;
+}
+
 void Tick() {
+  for (int& o : g_orphans) RemoveOwn(o);
+  g_orphans.clear();
   if (!g_enabled || g_blips.empty()) return;
   int ped = Native<int>(kPlayerPedId);
   g_shInit(kGetEntityCoords);
@@ -312,15 +358,21 @@ void Tick() {
   memcpy(v, g_shCall(), sizeof v);  // x, pad, y, pad, z, pad
   float px = v[0], py = v[2];
   bool saved = false;
-  int skulls = 0, hidden = 0;
+  int skulls = 0, hidden = 0, own = 0, created = 0;
   for (size_t i = 0; i < g_blips.size();) {
     Blip& b = g_blips[i];
     if (!Native<int>(kDoesBlipExist, b.handle)) {
+      // Bandit Hideouts took its skull away (a cleared hideout): our stand-in goes with it
+      if (b.own) Log("hideout at %.1f %.1f: skull gone, our blip removed", b.x, b.y);
+      RemoveOwn(b.own);
       g_blips.erase(g_blips.begin() + i);
       continue;
     }
     ++i;
-    if (!b.skull) continue;
+    if (!b.skull) {
+      RemoveOwn(b.own);
+      continue;
+    }
     ++skulls;
     bool visited = Visited(b);
     float dx = px - b.x, dy = py - b.y;
@@ -329,25 +381,38 @@ void Tick() {
       saved = visited = true;
       Log("visited the hideout at %.1f %.1f", b.x, b.y);
     }
-    if (visited) {
+    if (visited && g_ownBlips) {
+      if (!b.own || !Native<int>(kDoesBlipExist, b.own)) {
+        b.own = AddOwn(b);
+        if (b.own) ++created;
+      }
+      if (b.own) {
+        Hide(b.handle);
+        ++own;
+      } else {  // could not make ours: keep the Bandit Hideouts skull on the map
+        Native<int>(kBlipRemoveModifier, b.handle, kModifierHidden);
+      }
+    } else if (visited) {
+      RemoveOwn(b.own);
       if (!b.shown) {
         Native<int>(kBlipRemoveModifier, b.handle, kModifierHidden);
         b.shown = true;
       }
     } else {
-      // re-applied every tick: Bandit Hideouts may restyle its blip and drop modifiers
-      Native<int>(kBlipRemoveModifier, b.handle, kModifierHidden);
-      Native<int>(kBlipAddModifier, b.handle, kModifierHidden);
+      RemoveOwn(b.own);
+      Hide(b.handle);
       b.shown = false;
       ++hidden;
     }
   }
   if (saved) SaveVisited();
-  static int lastSkulls = -1, lastHidden = -1;
-  if (skulls != lastSkulls || hidden != lastHidden) {
-    Log("%d hideout skulls, %d hidden, %d visited in total", skulls, hidden, (int)g_visited.size());
+  static int lastSkulls = -1, lastHidden = -1, lastOwn = -1;
+  if (skulls != lastSkulls || hidden != lastHidden || own != lastOwn || created) {
+    Log("%d hideout skulls, %d hidden, %d shown as our blips (%d made now), %d visited in total", skulls, hidden, own,
+        created, (int)g_visited.size());
     lastSkulls = skulls;
     lastHidden = hidden;
+    lastOwn = own;
   }
 }
 
@@ -366,6 +431,7 @@ void ReadIni() {
   std::wstring ini = g_dir + L"\\HideoutMemory.ini";
   g_enabled = GetPrivateProfileIntW(L"HideoutMemory", L"Enabled", 1, ini.c_str()) != 0;
   g_radius = (float)GetPrivateProfileIntW(L"HideoutMemory", L"Radius", 150, ini.c_str());
+  g_ownBlips = GetPrivateProfileIntW(L"HideoutMemory", L"OwnBlips", 1, ini.c_str()) != 0;
 }
 
 // Waits for Bandit_Hideouts.asi and for plugins that patch at load time (RuText),
@@ -413,7 +479,8 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
   Log("HideoutMemory %s loaded", kVersion);
   ReadIni();
   LoadVisited();
-  Log("Enabled=%d Radius=%.0f, %d hideouts visited before", g_enabled, g_radius, (int)g_visited.size());
+  Log("Enabled=%d Radius=%.0f OwnBlips=%d, %d hideouts visited before", g_enabled, g_radius, g_ownBlips,
+      (int)g_visited.size());
   HANDLE t = CreateThread(nullptr, 0, Boot, nullptr, 0, nullptr);
   if (t) CloseHandle(t);
   return TRUE;

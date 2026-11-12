@@ -18,6 +18,7 @@ Copy `HideoutMemory.asi` and `HideoutMemory.ini` into the game folder. With Vort
 |---|---|---|
 | `Enabled` | 1 | |
 | `Radius` | 150 | metres: how close you have to come for a hideout to count as visited |
+| `OwnBlips` | 1 | 1: a visited hideout is shown by a map icon in the game's own hideout style, which the map highlights under the cursor and which opens the game's hideout card; it disappears and comes back together with the Bandit Hideouts skull. 0: the Bandit Hideouts skull itself |
 
 Visited hideouts are kept in `<game>\HideoutMemory.dat` (one `x y z` per line). Delete it to start over. `HideoutMemory.log` shows what happened.
 
@@ -37,4 +38,4 @@ MIT, see [LICENSE](LICENSE).
 
 ## По-русски
 
-Дополнение к Bandit Hideouts: значок логова появляется на карте, когда вы подъехали к нему ближе 150 м, и остаётся навсегда. Зачищенное логово Bandit Hideouts сам убирает, пока оно не заселится снова. Нужен `ALWAYS_SHOW_HIDEOUT_BLIP=1` в `Bandit_Hideouts.ini`. `HideoutMemory.asi` и `HideoutMemory.ini` — в папку игры.
+Дополнение к Bandit Hideouts: значок логова появляется на карте, когда вы подъехали к нему ближе 150 м, и остаётся навсегда. Значок подсвечивается под курсором и открывает карточку логова, как значки самой игры (`OwnBlips=1`). Зачищенное логово Bandit Hideouts сам убирает, пока оно не заселится снова. Нужен `ALWAYS_SHOW_HIDEOUT_BLIP=1` в `Bandit_Hideouts.ini`. `HideoutMemory.asi` и `HideoutMemory.ini` — в папку игры.
