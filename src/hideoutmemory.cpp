@@ -12,6 +12,11 @@
 // style and map card, the same skull) instead of the Bandit Hideouts area blip, which the
 // map does not highlight; it lives exactly as long as the Bandit Hideouts skull does.
 //
+// With BanditNames=1 the bandits Bandit Hideouts spawns get a name ("Бандит", their horses
+// "Лошадь бандита") that the game shows when you aim at them or focus on them; the mod itself
+// names only its special peds, so its bandits looked exactly like townsfolk through the sights.
+// Only peds in its bandit relationship groups are named, never hostages or hired guns.
+//
 // How: ScriptHook mods call natives through three exports of ScriptHookRDR2.dll
 // (nativeInit, nativePush64, nativeCall). HideoutMemory rewrites those import-table
 // entries of Bandit_Hideouts.asi only, and passes every call on to whatever the
@@ -33,7 +38,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "1.1.0";
+constexpr const char* kVersion = "1.2.0";
 
 constexpr const char* kExpInit = "?nativeInit@@YAX_K@Z";
 constexpr const char* kExpPush = "?nativePush64@@YAX_K@Z";
@@ -58,6 +63,21 @@ constexpr uint64_t kPlayerPedId = 0x096275889B8E0EE0ULL;
 constexpr uint64_t kGetEntityCoords = 0xA86D5F069399F44DULL;
 constexpr uint64_t kSetBlipNameFromTextFile = 0x0A062D6D7C0B2C2CULL;
 constexpr uint64_t kSetBlipMapCardInfo = 0x02FF4CF43B7209D1ULL;  // (blip, card type, hash); nativedb: SET_BLIP_FLASH_TIMER
+constexpr uint64_t kAddRelationshipGroup = 0xF372BC22FCB88606ULL;  // (const char* name, Hash* out)
+constexpr uint64_t kCreatePed = 0xD49F9B0955C367DEULL;
+constexpr uint64_t kCreatePedInsideVehicle = 0x7DD959874C1FD534ULL;
+constexpr uint64_t kSetPedPromptName = 0x4A48B6E03BABB4ACULL;  // _SET_PED_PROMPT_NAME(ped, const char*)
+constexpr uint64_t kDoesEntityExist = 0xD42BD6EB2E0F1677ULL;
+constexpr uint64_t kIsPedHuman = 0xB980061DA992779DULL;
+constexpr uint64_t kGetPedRelationshipGroupHash = 0x7DBDD04862D95F04ULL;
+constexpr uint64_t kGetMount = 0xE7E11B8DCBED1058ULL;
+constexpr uint64_t kGetHashKey = 0xFD340785ADF8CFB7ULL;
+// Bandit Hideouts' own relationship groups for its bandits (it also has hostage, corpse, neutral
+// and undead groups, which are not named)
+constexpr const char* kBanditGroups[] = {"banditRelGrp", "hideoutRelGrp", "roamingBanditRelGrp"};
+constexpr const char* kBanditName = u8"Бандит";  // Бандит
+constexpr const char* kBanditHorseName =
+    u8"Лошадь бандита";  // Лошадь бандита
 constexpr uint32_t kModifierHidden = 0xB946AEF0;  // BLIP_MODIFIER_HIDDEN
 constexpr uint32_t kSpriteHideout = 0x5846C31D;   // blip_ambient_bounty_target (HIDEOUT_ICON=1)
 // Our own point blip for a visited hideout: Bandit Hideouts draws an area blip (BLIP_STYLE_RCM),
@@ -81,6 +101,7 @@ FnCall g_nextCall = nullptr;
 
 bool g_enabled = true;
 bool g_ownBlips = true;  // 1 = our own point blip with a map card instead of the Bandit Hideouts skull
+bool g_banditNames = true;  // 1 = bandits and their horses get a name shown when aimed at
 float g_radius = 150.0f;
 std::wstring g_dir;
 FILE* g_log = nullptr;
@@ -113,6 +134,21 @@ std::vector<int> g_orphans;                    // our stand-in blips to remove o
 std::vector<std::array<float, 3>> g_visited;  // hideouts the player has been near
 int g_logged = 0;
 DWORD g_scriptStart = 0;  // GetTickCount when our script started; skulls added later are logged
+
+// Bandit names (game thread only)
+std::vector<uint32_t> g_banditGroups;  // relationship group hashes of the bandit groups
+std::vector<int> g_spawned;            // peds Bandit Hideouts created, not looked at yet
+std::vector<int> g_bandits;            // named bandits, kept to name the horse they ride
+std::vector<int> g_bhHorses;           // horses (non-human peds) Bandit Hideouts created
+std::vector<int> g_bhNamed;            // peds Bandit Hideouts named itself (undead, bodyguards)
+int g_namedBandits = 0, g_namedHorses = 0;
+
+template <typename T>
+bool Has(const std::vector<T>& v, T x) {
+  for (auto& e : v)
+    if (e == x) return true;
+  return false;
+}
 
 bool LateEnough() { return g_scriptStart && GetTickCount() - g_scriptStart > 30000; }
 
@@ -197,7 +233,9 @@ void Modifier(int handle, uint32_t modifier, bool add) {
 // ---------------------------------------------------------------- hooks on the target's imports
 
 struct CallState {
-  int kind = 0;  // 1 = blip add, 2 = SET_BLIP_SPRITE, 3 = REMOVE_BLIP, 4/5 = modifier add/remove
+  // 1 = blip add, 2 = SET_BLIP_SPRITE, 3 = REMOVE_BLIP, 4/5 = modifier add/remove,
+  // 6 = ADD_RELATIONSHIP_GROUP, 7 = ped created, 8 = _SET_PED_PROMPT_NAME
+  int kind = 0;
   int index = 0;
   uint64_t args[4] = {};
 };
@@ -218,6 +256,12 @@ void HookInit(uint64_t hash) {
                 : hash == kBlipAddModifier    ? 4
                 : hash == kBlipRemoveModifier ? 5
                                               : 0;
+  if (!t_call.kind && g_banditNames) {
+    t_call.kind = hash == kAddRelationshipGroup                         ? 6
+                  : (hash == kCreatePed || hash == kCreatePedInsideVehicle) ? 7
+                  : hash == kSetPedPromptName                           ? 8
+                                                                        : 0;
+  }
   t_call.index = 0;
   // tail call: a plugin further down the chain (RuText) looks at the return address
   // to tell which mod is calling, so it must still point into Bandit_Hideouts.asi
@@ -246,6 +290,23 @@ uint64_t* HookCall() {
           (uint32_t)t_call.args[0]);
   } else if (t_call.kind == 2) {
     Sprite((int)(uint32_t)t_call.args[0], (uint32_t)t_call.args[1]);
+  } else if (t_call.kind == 6 && t_call.args[0] && t_call.args[1]) {
+    const char* name = (const char*)t_call.args[0];
+    uint32_t group = 0;
+    memcpy(&group, (const void*)t_call.args[1], sizeof group);
+    for (const char* b : kBanditGroups) {
+      if (strcmp(name, b) == 0 && group && !Has(g_banditGroups, group)) {
+        g_banditGroups.push_back(group);
+        Log("bandit relationship group %s = 0x%08X", name, group);
+      }
+    }
+  } else if (t_call.kind == 7 && r) {
+    int ped = 0;
+    memcpy(&ped, r, sizeof ped);
+    if (ped) g_spawned.push_back(ped);
+  } else if (t_call.kind == 8) {
+    int ped = (int)(uint32_t)t_call.args[0];
+    if (ped && !Has(g_bhNamed, ped)) g_bhNamed.push_back(ped);
   }
   t_call.kind = 0;
   return r;
@@ -345,7 +406,64 @@ int AddOwn(const Blip& b) {
   return own;
 }
 
+bool Exists(int entity) { return entity && Native<int>(kDoesEntityExist, entity) != 0; }
+
+// Names the bandits Bandit Hideouts spawned since the last tick, and the horses they ride
+void NameBandits() {
+  if (!g_banditNames) return;
+  if (g_banditGroups.empty()) {  // groups made before we hooked: the game hashes the name
+    for (const char* b : kBanditGroups) g_banditGroups.push_back(Native<uint32_t>(kGetHashKey, b));
+    Log("bandit relationship groups taken from their names");
+  }
+  for (int ped : g_spawned) {
+    if (!Exists(ped)) continue;
+    if (!Native<int>(kIsPedHuman, ped)) {
+      if (!Has(g_bhHorses, ped)) g_bhHorses.push_back(ped);
+      continue;
+    }
+    if (Has(g_bhNamed, ped)) continue;
+    uint32_t group = Native<uint32_t>(kGetPedRelationshipGroupHash, ped);
+    if (!Has(g_banditGroups, group)) continue;
+    Native<int>(kSetPedPromptName, ped, kBanditName);
+    g_bandits.push_back(ped);
+    ++g_namedBandits;
+  }
+  g_spawned.clear();
+  for (size_t i = 0; i < g_bandits.size();) {
+    int ped = g_bandits[i];
+    if (!Exists(ped)) {
+      g_bandits.erase(g_bandits.begin() + i);
+      continue;
+    }
+    ++i;
+    int mount = Native<int>(kGetMount, ped);
+    for (size_t h = 0; mount && h < g_bhHorses.size(); ++h) {
+      if (g_bhHorses[h] != mount) continue;
+      Native<int>(kSetPedPromptName, mount, kBanditHorseName);
+      g_bhHorses.erase(g_bhHorses.begin() + h);
+      ++g_namedHorses;
+      break;
+    }
+  }
+  for (size_t i = 0; i < g_bhHorses.size();) {
+    if (!Exists(g_bhHorses[i])) g_bhHorses.erase(g_bhHorses.begin() + i);
+    else ++i;
+  }
+  for (size_t i = 0; i < g_bhNamed.size();) {
+    if (!Exists(g_bhNamed[i])) g_bhNamed.erase(g_bhNamed.begin() + i);
+    else ++i;
+  }
+  static int lastBandits = -1, lastHorses = -1;
+  if (g_namedBandits != lastBandits || g_namedHorses != lastHorses) {
+    Log("named %d bandits and %d of their horses so far (%d bandits around now)", g_namedBandits, g_namedHorses,
+        (int)g_bandits.size());
+    lastBandits = g_namedBandits;
+    lastHorses = g_namedHorses;
+  }
+}
+
 void Tick() {
+  NameBandits();
   for (int& o : g_orphans) RemoveOwn(o);
   g_orphans.clear();
   if (!g_enabled || g_blips.empty()) return;
@@ -432,6 +550,7 @@ void ReadIni() {
   g_enabled = GetPrivateProfileIntW(L"HideoutMemory", L"Enabled", 1, ini.c_str()) != 0;
   g_radius = (float)GetPrivateProfileIntW(L"HideoutMemory", L"Radius", 150, ini.c_str());
   g_ownBlips = GetPrivateProfileIntW(L"HideoutMemory", L"OwnBlips", 1, ini.c_str()) != 0;
+  g_banditNames = GetPrivateProfileIntW(L"HideoutMemory", L"BanditNames", 1, ini.c_str()) != 0;
 }
 
 // Waits for Bandit_Hideouts.asi and for plugins that patch at load time (RuText),
@@ -479,8 +598,8 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
   Log("HideoutMemory %s loaded", kVersion);
   ReadIni();
   LoadVisited();
-  Log("Enabled=%d Radius=%.0f OwnBlips=%d, %d hideouts visited before", g_enabled, g_radius, g_ownBlips,
-      (int)g_visited.size());
+  Log("Enabled=%d Radius=%.0f OwnBlips=%d BanditNames=%d, %d hideouts visited before", g_enabled, g_radius,
+      g_ownBlips, g_banditNames, (int)g_visited.size());
   HANDLE t = CreateThread(nullptr, 0, Boot, nullptr, 0, nullptr);
   if (t) CloseHandle(t);
   return TRUE;
