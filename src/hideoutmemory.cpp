@@ -38,7 +38,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "1.2.0";
+constexpr const char* kVersion = "1.3.0";
 
 constexpr const char* kExpInit = "?nativeInit@@YAX_K@Z";
 constexpr const char* kExpPush = "?nativePush64@@YAX_K@Z";
@@ -72,6 +72,8 @@ constexpr uint64_t kIsPedHuman = 0xB980061DA992779DULL;
 constexpr uint64_t kGetPedRelationshipGroupHash = 0x7DBDD04862D95F04ULL;
 constexpr uint64_t kGetMount = 0xE7E11B8DCBED1058ULL;
 constexpr uint64_t kGetHashKey = 0xFD340785ADF8CFB7ULL;
+constexpr uint64_t kIsEntityDead = 0x7D5B1F88E7504BBAULL;
+constexpr uint64_t kMoneyIncrement = 0xBC3422DC91667621ULL;  // _MONEY_INCREMENT_CASH_BALANCE(int cents, Hash reason)
 // Bandit Hideouts' own relationship groups for its bandits (it also has hostage, corpse, neutral
 // and undead groups, which are not named)
 constexpr const char* kBanditGroups[] = {"banditRelGrp", "hideoutRelGrp", "roamingBanditRelGrp"};
@@ -102,6 +104,12 @@ FnCall g_nextCall = nullptr;
 bool g_enabled = true;
 bool g_ownBlips = true;  // 1 = our own point blip with a map card instead of the Bandit Hideouts skull
 bool g_banditNames = true;  // 1 = bandits and their horses get a name shown when aimed at
+// Pay per bandit (his wish, 17.11: the $25-150 for a cleared hideout felt like too much, it should depend on how many
+// there were): every Bandit Hideouts bandit seen dead since the last payout is worth RewardPerBandit dollars, and the
+// amount Bandit Hideouts pays (_MONEY_INCREMENT_CASH_BALANCE) is replaced by that. 0 = its own random amount.
+int g_rewardPerBandit = 5;
+int g_deadSincePay = 0;
+std::vector<int> g_counted;  // dead bandits already counted
 float g_radius = 150.0f;
 std::wstring g_dir;
 FILE* g_log = nullptr;
@@ -234,7 +242,7 @@ void Modifier(int handle, uint32_t modifier, bool add) {
 
 struct CallState {
   // 1 = blip add, 2 = SET_BLIP_SPRITE, 3 = REMOVE_BLIP, 4/5 = modifier add/remove,
-  // 6 = ADD_RELATIONSHIP_GROUP, 7 = ped created, 8 = _SET_PED_PROMPT_NAME
+  // 6 = ADD_RELATIONSHIP_GROUP, 7 = ped created, 8 = _SET_PED_PROMPT_NAME, 9 = cash paid
   int kind = 0;
   int index = 0;
   uint64_t args[4] = {};
@@ -256,12 +264,13 @@ void HookInit(uint64_t hash) {
                 : hash == kBlipAddModifier    ? 4
                 : hash == kBlipRemoveModifier ? 5
                                               : 0;
-  if (!t_call.kind && g_banditNames) {
+  if (!t_call.kind && (g_banditNames || g_rewardPerBandit > 0)) {
     t_call.kind = hash == kAddRelationshipGroup                         ? 6
                   : (hash == kCreatePed || hash == kCreatePedInsideVehicle) ? 7
                   : hash == kSetPedPromptName                           ? 8
                                                                         : 0;
   }
+  if (!t_call.kind && g_rewardPerBandit > 0 && hash == kMoneyIncrement) t_call.kind = 9;
   t_call.index = 0;
   // tail call: a plugin further down the chain (RuText) looks at the return address
   // to tell which mod is calling, so it must still point into Bandit_Hideouts.asi
@@ -269,6 +278,18 @@ void HookInit(uint64_t hash) {
 }
 
 void HookPush(uint64_t value) {
+  if (t_call.kind == 9 && t_call.index == 0) {
+    int cents = (int)(uint32_t)value;
+    if (g_deadSincePay > 0) {
+      int ours = g_deadSincePay * g_rewardPerBandit * 100;
+      Log("hideout reward: Bandit Hideouts paid $%d.%02d, now %d bandits x $%d = $%d", cents / 100, cents % 100,
+          g_deadSincePay, g_rewardPerBandit, ours / 100);
+      value = (uint64_t)(uint32_t)ours;
+      g_deadSincePay = 0;
+    } else {
+      Log("hideout reward: Bandit Hideouts paid $%d.%02d, no dead bandits counted - left as it is", cents / 100, cents % 100);
+    }
+  }
   if (t_call.kind && t_call.index < 4) t_call.args[t_call.index] = value;
   ++t_call.index;
   return g_nextPush(value);
@@ -433,9 +454,15 @@ void NameBandits() {
     int ped = g_bandits[i];
     if (!Exists(ped)) {
       g_bandits.erase(g_bandits.begin() + i);
+      for (size_t c = 0; c < g_counted.size(); ++c)
+        if (g_counted[c] == ped) { g_counted.erase(g_counted.begin() + c); break; }
       continue;
     }
     ++i;
+    if (g_rewardPerBandit > 0 && !Has(g_counted, ped) && Native<int>(kIsEntityDead, ped)) {
+      g_counted.push_back(ped);
+      ++g_deadSincePay;
+    }
     int mount = Native<int>(kGetMount, ped);
     for (size_t h = 0; mount && h < g_bhHorses.size(); ++h) {
       if (g_bhHorses[h] != mount) continue;
@@ -551,6 +578,7 @@ void ReadIni() {
   g_radius = (float)GetPrivateProfileIntW(L"HideoutMemory", L"Radius", 150, ini.c_str());
   g_ownBlips = GetPrivateProfileIntW(L"HideoutMemory", L"OwnBlips", 1, ini.c_str()) != 0;
   g_banditNames = GetPrivateProfileIntW(L"HideoutMemory", L"BanditNames", 1, ini.c_str()) != 0;
+  g_rewardPerBandit = GetPrivateProfileIntW(L"HideoutMemory", L"RewardPerBandit", 5, ini.c_str());
 }
 
 // Waits for Bandit_Hideouts.asi and for plugins that patch at load time (RuText),
@@ -598,8 +626,8 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
   Log("HideoutMemory %s loaded", kVersion);
   ReadIni();
   LoadVisited();
-  Log("Enabled=%d Radius=%.0f OwnBlips=%d BanditNames=%d, %d hideouts visited before", g_enabled, g_radius,
-      g_ownBlips, g_banditNames, (int)g_visited.size());
+  Log("Enabled=%d Radius=%.0f OwnBlips=%d BanditNames=%d RewardPerBandit=%d, %d hideouts visited before", g_enabled,
+      g_radius, g_ownBlips, g_banditNames, g_rewardPerBandit, (int)g_visited.size());
   HANDLE t = CreateThread(nullptr, 0, Boot, nullptr, 0, nullptr);
   if (t) CloseHandle(t);
   return TRUE;
