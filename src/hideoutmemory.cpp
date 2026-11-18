@@ -38,7 +38,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "1.3.0";
+constexpr const char* kVersion = "1.3.1";
 
 constexpr const char* kExpInit = "?nativeInit@@YAX_K@Z";
 constexpr const char* kExpPush = "?nativePush64@@YAX_K@Z";
@@ -64,6 +64,8 @@ constexpr uint64_t kGetEntityCoords = 0xA86D5F069399F44DULL;
 constexpr uint64_t kSetBlipNameFromTextFile = 0x0A062D6D7C0B2C2CULL;
 constexpr uint64_t kSetBlipMapCardInfo = 0x02FF4CF43B7209D1ULL;  // (blip, card type, hash); nativedb: SET_BLIP_FLASH_TIMER
 constexpr uint64_t kAddRelationshipGroup = 0xF372BC22FCB88606ULL;  // (const char* name, Hash* out)
+constexpr uint64_t kSetPedRelationshipGroupHash = 0xC80A74AC829DDD92ULL;  // (Ped ped, Hash group)
+constexpr uint64_t kGetGameTimer = 0x4F67E8ECA7D3F667ULL;
 constexpr uint64_t kCreatePed = 0xD49F9B0955C367DEULL;
 constexpr uint64_t kCreatePedInsideVehicle = 0x7DD959874C1FD534ULL;
 constexpr uint64_t kSetPedPromptName = 0x4A48B6E03BABB4ACULL;  // _SET_PED_PROMPT_NAME(ped, const char*)
@@ -145,7 +147,10 @@ DWORD g_scriptStart = 0;  // GetTickCount when our script started; skulls added 
 
 // Bandit names (game thread only)
 std::vector<uint32_t> g_banditGroups;  // relationship group hashes of the bandit groups
-std::vector<int> g_spawned;            // peds Bandit Hideouts created, not looked at yet
+std::vector<int> g_spawned;            // peds Bandit Hideouts created, not recognised yet
+std::vector<int> g_spawnedAt;          // when (game timer): looked at again until the group is set (18.11: the group
+                                       // came after our one look, so no bandit was ever named or counted)
+std::vector<uint32_t> g_otherGroups;   // groups of spawned humans that were not bandit groups (logged once each)
 std::vector<int> g_bandits;            // named bandits, kept to name the horse they ride
 std::vector<int> g_bhHorses;           // horses (non-human peds) Bandit Hideouts created
 std::vector<int> g_bhNamed;            // peds Bandit Hideouts named itself (undead, bodyguards)
@@ -268,6 +273,7 @@ void HookInit(uint64_t hash) {
     t_call.kind = hash == kAddRelationshipGroup                         ? 6
                   : (hash == kCreatePed || hash == kCreatePedInsideVehicle) ? 7
                   : hash == kSetPedPromptName                           ? 8
+                  : hash == kSetPedRelationshipGroupHash                ? 10
                                                                         : 0;
   }
   if (!t_call.kind && g_rewardPerBandit > 0 && hash == kMoneyIncrement) t_call.kind = 9;
@@ -324,7 +330,18 @@ uint64_t* HookCall() {
   } else if (t_call.kind == 7 && r) {
     int ped = 0;
     memcpy(&ped, r, sizeof ped);
-    if (ped) g_spawned.push_back(ped);
+    if (ped && !Has(g_spawned, ped)) {
+      g_spawned.push_back(ped);
+      g_spawnedAt.push_back(0);
+      static int made = 0;
+      if (++made == 1 || made % 10 == 0) Log("Bandit Hideouts made %d peds so far", made);
+    }
+  } else if (t_call.kind == 10) {  // Bandit Hideouts puts a ped into a group: look at it again
+    int ped = (int)(uint32_t)t_call.args[0];
+    if (ped && !Has(g_spawned, ped) && !Has(g_bandits, ped)) {
+      g_spawned.push_back(ped);
+      g_spawnedAt.push_back(0);
+    }
   } else if (t_call.kind == 8) {
     int ped = (int)(uint32_t)t_call.args[0];
     if (ped && !Has(g_bhNamed, ped)) g_bhNamed.push_back(ped);
@@ -430,26 +447,43 @@ int AddOwn(const Blip& b) {
 bool Exists(int entity) { return entity && Native<int>(kDoesEntityExist, entity) != 0; }
 
 // Names the bandits Bandit Hideouts spawned since the last tick, and the horses they ride
-void NameBandits() {
-  if (!g_banditNames) return;
+void NameBandits() {  // also counts them for RewardPerBandit, with or without names
+  if (!g_banditNames && g_rewardPerBandit <= 0) return;
   if (g_banditGroups.empty()) {  // groups made before we hooked: the game hashes the name
     for (const char* b : kBanditGroups) g_banditGroups.push_back(Native<uint32_t>(kGetHashKey, b));
     Log("bandit relationship groups taken from their names");
   }
-  for (int ped : g_spawned) {
-    if (!Exists(ped)) continue;
-    if (!Native<int>(kIsPedHuman, ped)) {
+  const int now = Native<int>(kGetGameTimer);
+  for (size_t i = 0; i < g_spawned.size();) {
+    int ped = g_spawned[i];
+    if (!g_spawnedAt[i]) g_spawnedAt[i] = now;
+    bool done = !Exists(ped) || Has(g_bandits, ped);
+    if (!done && !Native<int>(kIsPedHuman, ped)) {
       if (!Has(g_bhHorses, ped)) g_bhHorses.push_back(ped);
-      continue;
+      done = true;
     }
-    if (Has(g_bhNamed, ped)) continue;
-    uint32_t group = Native<uint32_t>(kGetPedRelationshipGroupHash, ped);
-    if (!Has(g_banditGroups, group)) continue;
-    Native<int>(kSetPedPromptName, ped, kBanditName);
-    g_bandits.push_back(ped);
-    ++g_namedBandits;
+    if (!done) {
+      uint32_t group = Native<uint32_t>(kGetPedRelationshipGroupHash, ped);
+      if (Has(g_banditGroups, group)) {
+        if (g_banditNames && !Has(g_bhNamed, ped)) Native<int>(kSetPedPromptName, ped, kBanditName);  // its own name stays (undead, guards)
+        g_bandits.push_back(ped);
+        ++g_namedBandits;
+        done = true;
+      } else if (now - g_spawnedAt[i] > 15000) {  // never became a bandit
+        if (!Has(g_otherGroups, group)) {
+          g_otherGroups.push_back(group);
+          Log("a ped Bandit Hideouts made is in group 0x%08X - not a bandit group", group);
+        }
+        done = true;
+      }
+    }
+    if (done) {
+      g_spawned.erase(g_spawned.begin() + i);
+      g_spawnedAt.erase(g_spawnedAt.begin() + i);
+    } else {
+      ++i;
+    }
   }
-  g_spawned.clear();
   for (size_t i = 0; i < g_bandits.size();) {
     int ped = g_bandits[i];
     if (!Exists(ped)) {
@@ -463,7 +497,7 @@ void NameBandits() {
       g_counted.push_back(ped);
       ++g_deadSincePay;
     }
-    int mount = Native<int>(kGetMount, ped);
+    int mount = g_banditNames ? Native<int>(kGetMount, ped) : 0;
     for (size_t h = 0; mount && h < g_bhHorses.size(); ++h) {
       if (g_bhHorses[h] != mount) continue;
       Native<int>(kSetPedPromptName, mount, kBanditHorseName);
