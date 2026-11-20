@@ -38,7 +38,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "1.3.1";
+constexpr const char* kVersion = "1.3.2";
 
 constexpr const char* kExpInit = "?nativeInit@@YAX_K@Z";
 constexpr const char* kExpPush = "?nativePush64@@YAX_K@Z";
@@ -109,7 +109,7 @@ bool g_banditNames = true;  // 1 = bandits and their horses get a name shown whe
 // Pay per bandit (his wish, 17.11: the $25-150 for a cleared hideout felt like too much, it should depend on how many
 // there were): every Bandit Hideouts bandit seen dead since the last payout is worth RewardPerBandit dollars, and the
 // amount Bandit Hideouts pays (_MONEY_INCREMENT_CASH_BALANCE) is replaced by that. 0 = its own random amount.
-int g_rewardPerBandit = 5;
+int g_rewardPerBandit = 10;
 int g_deadSincePay = 0;
 std::vector<int> g_counted;  // dead bandits already counted
 float g_radius = 150.0f;
@@ -612,7 +612,7 @@ void ReadIni() {
   g_radius = (float)GetPrivateProfileIntW(L"HideoutMemory", L"Radius", 150, ini.c_str());
   g_ownBlips = GetPrivateProfileIntW(L"HideoutMemory", L"OwnBlips", 1, ini.c_str()) != 0;
   g_banditNames = GetPrivateProfileIntW(L"HideoutMemory", L"BanditNames", 1, ini.c_str()) != 0;
-  g_rewardPerBandit = GetPrivateProfileIntW(L"HideoutMemory", L"RewardPerBandit", 5, ini.c_str());
+  g_rewardPerBandit = GetPrivateProfileIntW(L"HideoutMemory", L"RewardPerBandit", 10, ini.c_str());
 }
 
 // Waits for Bandit_Hideouts.asi and for plugins that patch at load time (RuText),
