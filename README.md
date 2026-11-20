@@ -19,7 +19,7 @@ Copy `HideoutMemory.asi` and `HideoutMemory.ini` into the game folder. With Vort
 | `Enabled` | 1 | |
 | `Radius` | 150 | metres: how close you have to come for a hideout to count as visited |
 | `OwnBlips` | 1 | 1: a visited hideout is shown by a map icon in the game's own hideout style, which the map highlights under the cursor and which opens the game's hideout card; it disappears and comes back together with the Bandit Hideouts skull. 0: the Bandit Hideouts skull itself |
-| `BanditNames` | 1 | 1: Bandit Hideouts bandits are called "Бандит" (their horses "Лошадь бандита") when you aim at them |
+| `BanditNames` | 1 | 1: Bandit Hideouts bandits are called "Bandit" (their horses "Bandit's horse") when you aim at them; in a Russian game "Бандит" and "Лошадь бандита" |
 | `RewardPerBandit` | 10 | dollars for every Bandit Hideouts bandit killed; replaces its random `REWARD_MIN`-`REWARD_MAX` payout for a cleared hideout (instant reward, `REWARD_AT_POST_OFFICE=0`). 0: keep its own amount |
 
 Visited hideouts are kept in `<game>\HideoutMemory.dat` (one `x y z` per line). Delete it to start over. `HideoutMemory.log` shows what happened.

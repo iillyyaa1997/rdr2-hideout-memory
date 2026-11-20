@@ -12,8 +12,8 @@
 // style and map card, the same skull) instead of the Bandit Hideouts area blip, which the
 // map does not highlight; it lives exactly as long as the Bandit Hideouts skull does.
 //
-// With BanditNames=1 the bandits Bandit Hideouts spawns get a name ("Бандит", their horses
-// "Лошадь бандита") that the game shows when you aim at them or focus on them; the mod itself
+// With BanditNames=1 the bandits Bandit Hideouts spawns get a name ("Bandit" / "Бандит", their horses
+// "Bandit's horse" / "Лошадь бандита", in the game's language) shown when you aim at or focus on them; the mod itself
 // names only its special peds, so its bandits looked exactly like townsfolk through the sights.
 // Only peds in its bandit relationship groups are named, never hostages or hired guns.
 //
@@ -38,7 +38,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "1.3.2";
+constexpr const char* kVersion = "1.3.3";
 
 constexpr const char* kExpInit = "?nativeInit@@YAX_K@Z";
 constexpr const char* kExpPush = "?nativePush64@@YAX_K@Z";
@@ -79,9 +79,13 @@ constexpr uint64_t kMoneyIncrement = 0xBC3422DC91667621ULL;  // _MONEY_INCREMENT
 // Bandit Hideouts' own relationship groups for its bandits (it also has hostage, corpse, neutral
 // and undead groups, which are not named)
 constexpr const char* kBanditGroups[] = {"banditRelGrp", "hideoutRelGrp", "roamingBanditRelGrp"};
-constexpr const char* kBanditName = u8"Бандит";  // Бандит
-constexpr const char* kBanditHorseName =
-    u8"Лошадь бандита";  // Лошадь бандита
+// Names follow the game's language (LOCALIZATION::GET_CURRENT_LANGUAGE: 7 = Russian): before 1.3.3 they were
+// Russian only, which an English game shows in Cyrillic
+constexpr uint64_t kGetCurrentLanguage = 0xDB917DA5C6835FCCULL;
+constexpr const char* kBanditNameRu = u8"Бандит";
+constexpr const char* kBanditHorseNameRu = u8"Лошадь бандита";
+constexpr const char* kBanditNameEn = "Bandit";
+constexpr const char* kBanditHorseNameEn = "Bandit's horse";
 constexpr uint32_t kModifierHidden = 0xB946AEF0;  // BLIP_MODIFIER_HIDDEN
 constexpr uint32_t kSpriteHideout = 0x5846C31D;   // blip_ambient_bounty_target (HIDEOUT_ICON=1)
 // Our own point blip for a visited hideout: Bandit Hideouts draws an area blip (BLIP_STYLE_RCM),
@@ -418,6 +422,17 @@ R Native(uint64_t hash, A... args) {
   return out;
 }
 
+bool GameIsRussian() {
+  static int lang = -1;
+  if (lang < 0) {
+    lang = Native<int>(kGetCurrentLanguage);
+    Log("game language %d: bandits are named in %s", lang, lang == 7 ? "Russian" : "English");
+  }
+  return lang == 7;
+}
+const char* BanditName() { return GameIsRussian() ? kBanditNameRu : kBanditNameEn; }
+const char* BanditHorseName() { return GameIsRussian() ? kBanditHorseNameRu : kBanditHorseNameEn; }
+
 void Hide(int handle) {
   // re-applied every tick: Bandit Hideouts may restyle its blip and drop modifiers
   Native<int>(kBlipRemoveModifier, handle, kModifierHidden);
@@ -465,7 +480,7 @@ void NameBandits() {  // also counts them for RewardPerBandit, with or without n
     if (!done) {
       uint32_t group = Native<uint32_t>(kGetPedRelationshipGroupHash, ped);
       if (Has(g_banditGroups, group)) {
-        if (g_banditNames && !Has(g_bhNamed, ped)) Native<int>(kSetPedPromptName, ped, kBanditName);  // its own name stays (undead, guards)
+        if (g_banditNames && !Has(g_bhNamed, ped)) Native<int>(kSetPedPromptName, ped, BanditName());  // its own name stays (undead, guards)
         g_bandits.push_back(ped);
         ++g_namedBandits;
         done = true;
@@ -500,7 +515,7 @@ void NameBandits() {  // also counts them for RewardPerBandit, with or without n
     int mount = g_banditNames ? Native<int>(kGetMount, ped) : 0;
     for (size_t h = 0; mount && h < g_bhHorses.size(); ++h) {
       if (g_bhHorses[h] != mount) continue;
-      Native<int>(kSetPedPromptName, mount, kBanditHorseName);
+      Native<int>(kSetPedPromptName, mount, BanditHorseName());
       g_bhHorses.erase(g_bhHorses.begin() + h);
       ++g_namedHorses;
       break;
